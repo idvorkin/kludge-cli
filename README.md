@@ -34,6 +34,11 @@ rkkb map m1=esc m2=f13 --write # send them
 rkkb reset --write             # factory keymap
 ```
 
+`rkkb learn` is the interactive way: press a key on the RK keyboard, type what it should send, repeat, then
+type `done`. It shows each change and the full list of non-default keys as a Markdown table (worth keeping as
+a record, since the keymap can't be read back), and writes only if you answer `y`. It identifies keys by what
+they send now, so Fn and media keys can't be picked this way; use `map` with their name or `slot:N`.
+
 Keys are named by their label in RK's layout (`esc`, `a`, `capslock`, …), by `slot:N`, or, on keyboards with a
 macro column, `m1`…`m5` (the leftmost column, top to bottom).
 

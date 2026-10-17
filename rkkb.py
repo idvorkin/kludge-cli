@@ -70,6 +70,34 @@ def parse_target(spec: str) -> int:
     return code
 
 
+def describe(code: int) -> str:
+    """The inverse of parse_target, for showing codes to people: 0x104E00 -> 'rctrl+pagedown'."""
+    names = {v: k for k, v in HID.items()}
+    mod_names = ["ctrl", "shift", "opt", "cmd", "rctrl", "rshift", "ropt", "rcmd"]
+    mods, usage, rest = (code >> 16) & 0xFF, (code >> 8) & 0xFF, code & ~0xFFFF00
+    if rest or (usage and usage not in names):
+        return f"{code:#08x}"
+    parts = [m for i, m in enumerate(mod_names) if mods & (1 << i)]
+    return "+".join(parts + ([names[usage]] if usage else [])) or "nothing"
+
+
+def report_code(report: list[int]) -> int:
+    """A keyboard input report as a firmware code: modifiers << 16 | first key << 8.
+    Handles the 8-byte boot report, with or without a leading report id. 0 = all keys up."""
+    if len(report) == 9:
+        report = report[1:]
+    if len(report) < 3:
+        return 0
+    first = next((k for k in report[2:8] if k), 0)
+    return report[0] << 16 | first << 8
+
+
+def slots_for_code(layout: list[dict], overrides: dict[int, int], code: int) -> list[int]:
+    """Which slots currently send `code`: the firmware can't be read, so this trusts that the
+    keyboard holds RK's defaults plus the saved overrides."""
+    return [k["slot"] for k in layout if overrides.get(k["slot"], k["default"]) == code]
+
+
 def kk_file(rel: str) -> bytes | None:
     """A file from Kludge Knight's tree, or None if it does not exist there."""
     if KK_LOCAL:
@@ -237,6 +265,128 @@ def reset(pid: int = typer.Option(None, parser=lambda s: int(s, 0)),
     send(pid, load_layout(pid), {}, write)
 
 
+@app.command()
+def learn(pid: int = typer.Option(None, parser=lambda s: int(s, 0))):
+    """Press a key, say what it should send, repeat. Shows every change and asks before writing."""
+    pid = pid or config_interface(None)["product_id"]
+    layout = load_layout(pid)
+    saved = load_state(pid)
+    overrides = dict(saved)
+    by_slot = {k["slot"]: k for k in layout}
+    alias = {slot: name for name, slot in side_keys(layout).items()}
+    print("Press one key at a time, then type what it should send (e.g. cmd, esc, rctrl+pagedown),\n"
+          "'default' for RK's default, Enter to leave it, or 'done' to finish.")
+    with keyboard_input(pid) as read_code:
+        while True:
+            print("\npress a key on the RK keyboard...", flush=True)
+            code = read_code()
+            matches = slots_for_code(layout, overrides, code)
+            if not matches:
+                print(f"it sent {describe(code)}, which no key should send; skip it (Fn and media keys can't be learned)")
+                continue
+            if len(matches) > 1:
+                print(f"it sent {describe(code)}, shared by slots {matches}; using slot {matches[0]}")
+            slot = matches[0]
+            k = by_slot[slot]
+            name = alias.get(slot) or k["label"]
+            target = prompt(f"{name} (slot {slot}) sends {describe(code)}; default {describe(k['default'])}. New: ")
+            if target == "done":
+                break
+            if not target:
+                continue
+            if target == "default":
+                overrides.pop(slot, None)
+            else:
+                try:
+                    overrides[slot] = parse_target(target)
+                except typer.BadParameter as e:
+                    print(e)
+                    continue
+            print(f"  {name} -> {describe(overrides.get(slot, k['default']))}")
+    changed = sorted(s for s in set(saved) | set(overrides) if saved.get(s) != overrides.get(s))
+    if not changed:
+        print("no changes")
+        return
+    print("\n| Key | Was | Now |\n|---|---|---|")
+    for slot in changed:
+        k = by_slot[slot]
+        print(f"| {alias.get(slot) or k['label']} | {describe(saved.get(slot, k['default']))} "
+              f"| {describe(overrides.get(slot, k['default']))} |")
+    print_keymap(layout, overrides)
+    if prompt("\nWrite this keymap to the keyboard? [y/N] ").lower() != "y":
+        print("nothing written")
+        return
+    send(pid, layout, overrides, write=True)
+
+
+def print_keymap(layout: list[dict], overrides: dict[int, int]):
+    """Every key that differs from RK's default, as a Markdown table to keep as a record."""
+    alias = {slot: name for name, slot in side_keys(layout).items()}
+    print("\nFull keymap after this write (non-default keys):\n\n| Key | Sends |\n|---|---|")
+    for k in sorted(layout, key=lambda k: k["slot"]):
+        if k["slot"] in overrides and overrides[k["slot"]] != k["default"]:
+            print(f"| {alias.get(k['slot']) or k['label']} | {describe(overrides[k['slot']])} |")
+
+
+def prompt(text: str) -> str:
+    """input() after throwing away keystrokes the RK keyboard typed into the terminal."""
+    import termios
+    termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    return input(text).strip().lower()
+
+
+@contextlib.contextmanager
+def keyboard_input(pid: int):
+    """Yields read_code(): blocks until a key goes down and back up, returns its firmware code.
+    Needs the keyboard on USB, and Karabiner told to let go of it for the session."""
+    import hid
+    found = [d for d in hid.enumerate(RK_VID, pid) if d["usage_page"] == 0x01 and d["usage"] == 0x06]
+    if not found:
+        raise typer.Exit("no RK keyboard input interface found; connect it by USB")
+    open_shared()
+    with karabiner_released(pid):
+        dev = open_or_explain(found[0]["path"])
+        try:
+            def read_code() -> int:
+                while dev.read(64, 0):
+                    pass  # drop what was typed at the last prompt
+                code = 0
+                while True:
+                    report = dev.read(64, 200)
+                    if not report:
+                        continue
+                    now = report_code(report)
+                    if now:
+                        code = code or now  # the first report with a key down names it
+                    elif code:
+                        return code
+            yield read_code
+        finally:
+            dev.close()
+
+
+def open_shared():
+    """hidapi seizes devices on macOS by default; Karabiner already holds the keyboard."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        import hid
+        ctypes.CDLL(hid.__file__).hid_darwin_set_open_exclusive(0)
+
+
+def open_or_explain(path: bytes):
+    import hid
+    dev = hid.device()
+    try:
+        dev.open_path(path)
+    except OSError:
+        raise typer.Exit(
+            "could not open the keyboard. On macOS, opening a keyboard needs Input Monitoring for the app "
+            "running this command (System Settings > Privacy & Security > Input Monitoring); "
+            "quit and reopen that app after granting it.")
+    return dev
+
+
 KARABINER_CFG = Path.home() / ".config/karabiner/karabiner.json"
 
 
@@ -267,22 +417,10 @@ def send(pid: int, layout: list[dict], overrides: dict[int, int], write: bool):
             print(b.hex(" "))
         print("dry run: nothing sent. Add --write to send.")
         return
-    import ctypes
-
-    import hid
-    if sys.platform == "darwin":
-        # hidapi seizes devices on macOS by default; Karabiner already holds the keyboard.
-        ctypes.CDLL(hid.__file__).hid_darwin_set_open_exclusive(0)
+    open_shared()
     path = config_interface(pid)["path"]
     with karabiner_released(pid):
-        dev = hid.device()
-        try:
-            dev.open_path(path)
-        except OSError:
-            raise typer.Exit(
-                "could not open the keyboard. On macOS, opening a keyboard needs Input Monitoring for the app "
-                "running this command (System Settings > Privacy & Security > Input Monitoring); "
-                "quit and reopen that app after granting it.")
+        dev = open_or_explain(path)
         try:
             for b in buffers:
                 if dev.send_feature_report(b) != len(b):
