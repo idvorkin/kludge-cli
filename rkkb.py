@@ -213,9 +213,21 @@ def send(pid: int, layout: list[dict], overrides: dict[int, int], write: bool):
             print(b.hex(" "))
         print("dry run: nothing sent. Add --write to send.")
         return
+    import ctypes
+    import sys
+
     import hid
+    if sys.platform == "darwin":
+        # hidapi seizes devices on macOS by default; Karabiner already holds the keyboard.
+        ctypes.CDLL(hid.__file__).hid_darwin_set_open_exclusive(0)
     dev = hid.device()
-    dev.open_path(config_interface(pid)["path"])
+    try:
+        dev.open_path(config_interface(pid)["path"])
+    except OSError:
+        raise typer.Exit(
+            "could not open the keyboard. On macOS, opening a keyboard needs Input Monitoring for the app "
+            "running this command (System Settings > Privacy & Security > Input Monitoring); "
+            "quit and reopen that app after granting it.")
     try:
         for b in buffers:
             if dev.send_feature_report(b) != len(b):
