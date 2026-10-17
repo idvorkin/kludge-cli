@@ -280,7 +280,7 @@ def learn(pid: int = typer.Option(None, parser=lambda s: int(s, 0))):
         while True:
             print("\npress a key on the RK keyboard...", flush=True)
             code = read_code()
-            matches = slots_for_code(layout, overrides, code)
+            matches = slots_for_code(layout, saved, code)  # the keyboard still runs the saved map
             if not matches:
                 print(f"it sent {describe(code)}, which no key should send; skip it (Fn and media keys can't be learned)")
                 continue
@@ -289,7 +289,8 @@ def learn(pid: int = typer.Option(None, parser=lambda s: int(s, 0))):
             slot = matches[0]
             k = by_slot[slot]
             name = alias.get(slot) or k["label"]
-            target = prompt(f"{name} (slot {slot}) sends {describe(code)}; default {describe(k['default'])}. New: ")
+            pending = f", pending {describe(overrides.get(slot, k['default']))}" if overrides.get(slot) != saved.get(slot) else ""
+            target = prompt(f"{name} (slot {slot}) sends {describe(code)}{pending}; default {describe(k['default'])}. New: ")
             if target == "done":
                 break
             if not target:
@@ -348,7 +349,7 @@ def keyboard_input(pid: int):
         dev = open_or_explain(found[0]["path"])
         try:
             def read_code() -> int:
-                while dev.read(64, 0):
+                while dev.read(64, 1):
                     pass  # drop what was typed at the last prompt
                 code = 0
                 while True:
