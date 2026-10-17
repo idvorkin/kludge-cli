@@ -3,7 +3,7 @@ from pathlib import Path
 
 import rkkb
 
-CAPTURES = (rkkb.KK_ROOT / "docs/captures_s70.txt").read_text().splitlines()
+CAPTURES = rkkb.kk_file("docs/captures_s70.txt").decode().splitlines()
 
 
 def capture_block(after: str) -> list[bytes]:
@@ -39,3 +39,9 @@ def test_targets():
     assert rkkb.parse_target("f13") == 0x6800
     assert rkkb.parse_target("cmd+c") == 0x080600
     assert rkkb.parse_target("ctrl+a") == 0x010400  # the S70's factory M1
+
+
+def test_right_modifiers_and_modifier_only_targets():
+    assert rkkb.parse_target("rctrl+pagedown") == 0x104E00
+    assert rkkb.parse_target("rcmd+ropt") == 0xC00000
+    assert rkkb.parse_target("shift") == 0x020000  # the S70's own LShift code

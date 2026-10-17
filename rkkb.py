@@ -1,13 +1,8 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["hidapi", "typer"]
-# ///
 """rkkb: remap Royal Kludge keyboard keys from the command line, no browser.
 
-A local port of Kludge Knight's key-remap path (https://github.com/vinc3m1/kludgeknight,
-GPL-3.0; its BufferCodec derives from Rangoli). Keyboard layouts come from that repo's
-copy of RK's own config files, so clone it next to this script.
+A port of Kludge Knight's key-remap path (https://github.com/vinc3m1/kludgeknight,
+GPL-3.0; its BufferCodec derives from Rangoli). Keyboard layouts are RK's own config
+files as Kludge Knight ships them, fetched from its GitHub at a pinned commit and cached.
 
 The firmware can only be written, never read: every write sends the whole keymap,
 built from RK's defaults plus the overrides saved in ~/.config/rkkb/<pid>.json.
@@ -28,13 +23,21 @@ CONFIG_USAGE_PAGE, CONFIG_USAGE = 0x0001, 0x0080  # the interface Kludge Knight 
 NUM_BUFFERS, BUFFER_SIZE, BYTES_PER_KEY = 9, 65, 4
 REPORT_ID = 0x0A
 
-KK_ROOT = Path(os.environ.get("KLUDGEKNIGHT_DIR", Path.home() / "gits/kludgeknight"))
+# Layout data: a local Kludge Knight checkout if KLUDGEKNIGHT_DIR is set, else its GitHub
+# at KK_REF, cached under ~/.cache/kludge-cli/<ref>/.
+KK_LOCAL = os.environ.get("KLUDGEKNIGHT_DIR")
+KK_REF = os.environ.get("KLUDGEKNIGHT_REF", "b7b0359c3f7ce0e9f3d102075ff98d286ce1e6a8")
+KK_RAW = "https://raw.githubusercontent.com/vinc3m1/kludgeknight"
+CACHE_DIR = Path.home() / ".cache/kludge-cli"
 STATE_DIR = Path.home() / ".config/rkkb"
 
 # Modifier flags in RK firmware codes (Kludge Knight CLAUDE.md, from USB captures).
 # In Mac mode (Fn+S on the S70) the firmware sends Win as Cmd and Alt as Option.
+# They are the USB HID modifier byte shifted left 16: left side in bits 16-19, right in 20-23.
 MODIFIERS = {"ctrl": 0x010000, "shift": 0x020000, "alt": 0x040000, "opt": 0x040000,
-             "cmd": 0x080000, "win": 0x080000}
+             "cmd": 0x080000, "win": 0x080000,
+             "rctrl": 0x100000, "rshift": 0x200000, "ralt": 0x400000, "ropt": 0x400000,
+             "rcmd": 0x800000, "rwin": 0x800000}
 
 # USB HID keyboard usages; a plain key's firmware code is usage << 8.
 HID = {chr(ord("a") + i): 0x04 + i for i in range(26)}
@@ -49,13 +52,17 @@ HID |= {"enter": 0x28, "esc": 0x29, "backspace": 0x2A, "tab": 0x2B, "space": 0x2
 
 
 def parse_target(spec: str) -> int:
-    """'f13', 'cmd+c', 'ctrl+shift+4' or a raw firmware code like '0x6800'."""
+    """'f13', 'cmd+c', 'rctrl+pagedown', modifiers alone ('rcmd+ropt'), or a raw firmware
+    code like '0x6800'. Modifiers stay down for as long as the key is held."""
     if spec.lower().startswith("0x"):
         return int(spec, 16)
     *mods, key = spec.lower().split("+")
-    if key not in HID:
+    if key in MODIFIERS:
+        mods, code = [*mods, key], 0
+    elif key in HID:
+        code = HID[key] << 8
+    else:
         raise typer.BadParameter(f"unknown key {key!r}; known: {', '.join(sorted(HID))}")
-    code = HID[key] << 8
     for m in mods:
         if m not in MODIFIERS:
             raise typer.BadParameter(f"unknown modifier {m!r}; known: {', '.join(MODIFIERS)}")
@@ -63,21 +70,42 @@ def parse_target(spec: str) -> int:
     return code
 
 
+def kk_file(rel: str) -> bytes | None:
+    """A file from Kludge Knight's tree, or None if it does not exist there."""
+    if KK_LOCAL:
+        path = Path(KK_LOCAL) / rel
+        return path.read_bytes() if path.exists() else None
+    cached = CACHE_DIR / KK_REF / rel
+    if cached.exists():
+        return cached.read_bytes()
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{KK_RAW}/{KK_REF}/{rel}", timeout=30) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(data)
+    return data
+
+
 def vk_firmware_table() -> dict[int, int]:
     """Windows VK code -> RK firmware code, read from Kludge Knight's keycode.ts."""
-    src = (KK_ROOT / "src/types/keycode.ts").read_text()
+    src = kk_file("src/types/keycode.ts").decode()
     return {int(vk, 16): int(fw, 16)
             for vk, fw in re.findall(r"^\s*(0x[0-9A-Fa-f]+):\s*\{\s*vk:\s*0x[0-9a-fA-F]+,\s*fw:\s*(0x[0-9A-Fa-f]+)", src, re.M)}
 
 
 def read_kb_ini(pid: int) -> str:
     for name in (f"{pid:04X}", f"{pid:04x}"):
-        path = KK_ROOT / "public/rk/Dev" / name / "KB.ini"
-        if path.exists():
-            raw = path.read_bytes()
+        raw = kk_file(f"public/rk/Dev/{name}/KB.ini")
+        if raw is not None:
             utf16 = raw[:2] == b"\xff\xfe" or (len(raw) > 3 and (raw[1] == 0 or raw[3] == 0))
             return raw.decode("utf-16-le" if utf16 else "utf-8", errors="replace")
-    raise typer.BadParameter(f"no KB.ini for PID {pid:04X} under {KK_ROOT}/public/rk/Dev")
+    raise typer.BadParameter(f"Kludge Knight has no layout for PID {pid:04X}; this keyboard is not supported")
 
 
 def load_layout(pid: int) -> list[dict]:
