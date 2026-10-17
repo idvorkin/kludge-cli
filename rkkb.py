@@ -13,9 +13,12 @@ The firmware can only be written, never read: every write sends the whole keymap
 built from RK's defaults plus the overrides saved in ~/.config/rkkb/<pid>.json.
 """
 
+import contextlib
 import json
 import os
 import re
+import sys
+import time
 from pathlib import Path
 
 import typer
@@ -206,6 +209,29 @@ def reset(pid: int = typer.Option(None, parser=lambda s: int(s, 0)),
     send(pid, load_layout(pid), {}, write)
 
 
+KARABINER_CFG = Path.home() / ".config/karabiner/karabiner.json"
+
+
+@contextlib.contextmanager
+def karabiner_released(pid: int):
+    """Karabiner seizes keyboards, which makes any other open fail with 'exclusive access'.
+    Tell it to ignore this keyboard for the write, then put the config back exactly."""
+    if sys.platform != "darwin" or not KARABINER_CFG.exists():
+        yield
+        return
+    original = KARABINER_CFG.read_bytes()
+    cfg = json.loads(original)
+    profile = next(p for p in cfg["profiles"] if p.get("selected"))
+    profile.setdefault("devices", []).append(
+        {"identifiers": {"is_keyboard": True, "vendor_id": RK_VID, "product_id": pid}, "ignore": True})
+    KARABINER_CFG.write_text(json.dumps(cfg, indent=4))
+    try:
+        time.sleep(3)  # Karabiner reloads its config and releases the device
+        yield
+    finally:
+        KARABINER_CFG.write_bytes(original)
+
+
 def send(pid: int, layout: list[dict], overrides: dict[int, int], write: bool):
     buffers = encode(layout, overrides)
     if not write:
@@ -214,26 +240,27 @@ def send(pid: int, layout: list[dict], overrides: dict[int, int], write: bool):
         print("dry run: nothing sent. Add --write to send.")
         return
     import ctypes
-    import sys
 
     import hid
     if sys.platform == "darwin":
         # hidapi seizes devices on macOS by default; Karabiner already holds the keyboard.
         ctypes.CDLL(hid.__file__).hid_darwin_set_open_exclusive(0)
-    dev = hid.device()
-    try:
-        dev.open_path(config_interface(pid)["path"])
-    except OSError:
-        raise typer.Exit(
-            "could not open the keyboard. On macOS, opening a keyboard needs Input Monitoring for the app "
-            "running this command (System Settings > Privacy & Security > Input Monitoring); "
-            "quit and reopen that app after granting it.")
-    try:
-        for b in buffers:
-            if dev.send_feature_report(b) != len(b):
-                raise typer.Exit(f"short write: {dev.error()}")
-    finally:
-        dev.close()
+    path = config_interface(pid)["path"]
+    with karabiner_released(pid):
+        dev = hid.device()
+        try:
+            dev.open_path(path)
+        except OSError:
+            raise typer.Exit(
+                "could not open the keyboard. On macOS, opening a keyboard needs Input Monitoring for the app "
+                "running this command (System Settings > Privacy & Security > Input Monitoring); "
+                "quit and reopen that app after granting it.")
+        try:
+            for b in buffers:
+                if dev.send_feature_report(b) != len(b):
+                    raise typer.Exit(f"short write: {dev.error()}")
+        finally:
+            dev.close()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_path(pid).write_text(json.dumps({str(k): v for k, v in overrides.items()}, indent=1))
     print(f"sent {len(buffers)} reports; saved overrides to {state_path(pid)}")
