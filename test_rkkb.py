@@ -45,3 +45,23 @@ def test_right_modifiers_and_modifier_only_targets():
     assert rkkb.parse_target("rctrl+pagedown") == 0x104E00
     assert rkkb.parse_target("rcmd+ropt") == 0xC00000
     assert rkkb.parse_target("shift") == 0x020000  # the S70's own LShift code
+
+
+def test_describe_inverts_parse_target():
+    for spec in ["f13", "cmd+c", "rctrl+pagedown", "ropt+rcmd", "opt", "esc"]:
+        assert rkkb.describe(rkkb.parse_target(spec)) == spec
+    assert rkkb.describe(0x010000E9) == "0x10000e9"  # media keys stay raw
+
+
+def test_report_code_reads_boot_reports():
+    assert rkkb.report_code([0x08, 0, 0, 0, 0, 0, 0, 0]) == 0x080000  # Win alone
+    assert rkkb.report_code([0x10, 0, 0x4E, 0, 0, 0, 0, 0]) == 0x104E00  # rctrl+pagedown
+    assert rkkb.report_code([0x01, 0x04, 0, 0x29, 0, 0, 0, 0, 0]) == 0x042900  # opt+esc, with a report id
+    assert rkkb.report_code([0, 0, 0, 0, 0, 0, 0, 0]) == 0
+
+
+def test_slots_for_code_follows_overrides():
+    layout = rkkb.load_layout(0xD7)
+    assert rkkb.slots_for_code(layout, {}, 0x080000) == [17]  # LWin
+    assert rkkb.slots_for_code(layout, {17: 0x040000}, 0x080000) == []
+    assert 17 in rkkb.slots_for_code(layout, {17: 0x040000}, 0x040000)
