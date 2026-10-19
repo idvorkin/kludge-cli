@@ -34,6 +34,13 @@ rkkb map m1=esc m2=f13 --write # send them
 rkkb reset --write             # factory keymap
 ```
 
+To keep a keymap in git, write it as a TOML file and apply it. `apply` starts from the factory keymap, so
+the file is the whole truth; `configs/igor-mac.toml` is an example:
+
+```bash
+rkkb apply configs/igor-mac.toml --write
+```
+
 Keys are named by their label in RK's layout (`esc`, `a`, `capslock`, …), by `slot:N`, or, on keyboards with a
 macro column, `m1`…`m5` (the leftmost column, top to bottom).
 

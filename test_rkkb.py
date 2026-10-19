@@ -45,3 +45,10 @@ def test_right_modifiers_and_modifier_only_targets():
     assert rkkb.parse_target("rctrl+pagedown") == 0x104E00
     assert rkkb.parse_target("rcmd+ropt") == 0xC00000
     assert rkkb.parse_target("shift") == 0x020000  # the S70's own LShift code
+
+
+def test_igor_mac_config_has_one_esc():
+    import tomllib
+    cfg = tomllib.loads((Path(__file__).parent / "configs/igor-mac.toml").read_text())
+    got = rkkb.resolve(rkkb.load_layout(0xD7), cfg.items())
+    assert got[1] == 0x2900 and got[7] == 0x3500  # Esc on M1, the old Esc key sends `
