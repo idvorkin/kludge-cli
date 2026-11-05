@@ -1,0 +1,9 @@
+# Igor's default Mac setup for the RK SPLIT70 (PID 0x00D7), in the keyboard's Mac mode (Fn+S).
+# rkkb apply configs/igor-mac.toml --write
+
+m1 = "esc"
+m2 = "rcmd+f18"
+m3 = "rctrl+pagedown"
+m4 = "enter"
+m5 = "rcmd+ropt"     # held: push-to-talk
+esc = "grave"        # the old Esc key: ` and, with shift, ~

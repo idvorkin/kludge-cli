@@ -65,3 +65,10 @@ def test_slots_for_code_follows_overrides():
     assert rkkb.slots_for_code(layout, {}, 0x080000) == [17]  # LWin
     assert rkkb.slots_for_code(layout, {17: 0x040000}, 0x080000) == []
     assert 17 in rkkb.slots_for_code(layout, {17: 0x040000}, 0x040000)
+
+
+def test_igor_mac_config_has_one_esc():
+    import tomllib
+    cfg = tomllib.loads((Path(__file__).parent / "configs/igor-mac.toml").read_text())
+    got = rkkb.resolve(rkkb.load_layout(0xD7), cfg.items())
+    assert got[1] == 0x2900 and got[7] == 0x3500  # Esc on M1, the old Esc key sends `
