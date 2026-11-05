@@ -303,9 +303,13 @@ def learn(pid: int = typer.Option(None, parser=lambda s: int(s, 0))):
             if not matches:
                 print(f"it sent {describe(code)}, which no key should send; skip it (Fn and media keys can't be learned)")
                 continue
-            if len(matches) > 1:
-                print(f"it sent {describe(code)}, shared by slots {matches}; using slot {matches[0]}")
             slot = matches[0]
+            if len(matches) > 1:  # several keys send this code, so ask rather than guess
+                names = {(alias.get(s) or by_slot[s]["label"]).lower(): s for s in matches}
+                pick = prompt(f"it sent {describe(code)}, which {', '.join(names)} all send; which key? (Enter skips) ")
+                if pick not in names:
+                    continue
+                slot = names[pick]
             k = by_slot[slot]
             name = alias.get(slot) or k["label"]
             pending = f", pending {describe(overrides.get(slot, k['default']))}" if overrides.get(slot) != saved.get(slot) else ""
@@ -356,6 +360,24 @@ def prompt(text: str) -> str:
 
 
 @contextlib.contextmanager
+def no_terminal_signals():
+    """While capturing, a key mapped to ctrl+c / ctrl+z / ctrl+\\ also reaches the terminal; keep it
+    from interrupting or suspending rkkb. prompt() flushes those keystrokes afterwards."""
+    import termios
+    if not sys.stdin.isatty():
+        yield
+        return
+    old = termios.tcgetattr(sys.stdin)
+    new = list(old)
+    new[3] &= ~termios.ISIG
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, new)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, old)
+
+
+@contextlib.contextmanager
 def keyboard_input(pid: int):
     """Yields read_code(): blocks until a key goes down and back up, returns its firmware code.
     Needs the keyboard on USB, and Karabiner told to let go of it for the session."""
@@ -368,18 +390,19 @@ def keyboard_input(pid: int):
         dev = open_or_explain(found[0]["path"])
         try:
             def read_code() -> int:
-                while dev.read(64, 1):
-                    pass  # drop what was typed at the last prompt
-                code = 0
-                while True:
-                    report = dev.read(64, 200)
-                    if not report:
-                        continue
-                    now = report_code(report)
-                    if now:
-                        code = code or now  # the first report with a key down names it
-                    elif code:
-                        return code
+                with no_terminal_signals():
+                    while dev.read(64, 1):
+                        pass  # drop what was typed at the last prompt
+                    code = 0
+                    while True:
+                        report = dev.read(64, 200)
+                        if not report:
+                            continue
+                        now = report_code(report)
+                        if now:
+                            code = code or now  # the first report with a key down names it
+                        elif code:
+                            return code
             yield read_code
         finally:
             dev.close()
