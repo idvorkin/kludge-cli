@@ -117,3 +117,10 @@ def test_no_terminal_signals_clears_isig_and_restores(monkeypatch):
         pass
     off = (termios.ICRNL, termios.ECHO)
     assert calls == [off, (termios.IXON | termios.ICRNL, termios.ISIG | termios.ECHO)]  # restored after
+
+
+def test_learn_tells_two_same_named_keys_apart_by_slot(monkeypatch):
+    left, right = rkkb.slots_for_code(rkkb.load_layout(0xD7), {}, 0x2C00)  # the S70's two space keys
+    asked = run_learn(monkeypatch, {}, [0x2C00], [str(right), "done"])
+    assert f"space (slot {left}), space (slot {right})" in asked[0]
+    assert f"(slot {right})" in asked[1]

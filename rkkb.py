@@ -305,8 +305,12 @@ def learn(pid: int = typer.Option(None, parser=lambda s: int(s, 0))):
                 continue
             slot = matches[0]
             if len(matches) > 1:  # several keys send this code, so ask rather than guess
-                names = {(alias.get(s) or by_slot[s]["label"]).lower(): s for s in matches}
-                pick = prompt(f"it sent {describe(code)}, which {', '.join(names)} all send; which key? (Enter skips) ")
+                labels = [(alias.get(s) or by_slot[s]["label"]).lower() for s in matches]
+                unique = [labels.count(n) == 1 for n in labels]  # the S70 has two "space" keys
+                names = {n: s for n, s, u in zip(labels, matches, unique) if u} | {str(s): s for s in matches}
+                shown = ", ".join(n if u else f"{n} (slot {s})" for n, s, u in zip(labels, matches, unique))
+                pick = prompt(f"it sent {describe(code)}, which {shown} all send; "
+                              "which key? (name or slot number, Enter skips) ")
                 if pick not in names:
                     continue
                 slot = names[pick]
