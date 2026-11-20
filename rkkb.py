@@ -243,18 +243,37 @@ def map_keys(
     """Remap keys. Without --write, print what would be sent and change nothing."""
     pid = pid or config_interface(None)["product_id"]
     layout = load_layout(pid)
+    overrides = load_state(pid) | resolve(layout, [s.partition("=")[::2] for s in specs])
+    send(pid, layout, overrides, write)
+
+
+@app.command()
+def apply(
+    config: Path = typer.Argument(..., help="TOML file of key = \"target\" lines, e.g. configs/igor-mac.toml"),
+    pid: int = typer.Option(None, parser=lambda s: int(s, 0)),
+    write: bool = typer.Option(False, "--write", help="actually send to the keyboard"),
+):
+    """Set the keymap to RK's defaults plus exactly the mappings in CONFIG. Saved overrides
+    not in the file are dropped, so the file is the whole truth."""
+    import tomllib
+    pid = pid or config_interface(None)["product_id"]
+    layout = load_layout(pid)
+    send(pid, layout, resolve(layout, tomllib.loads(config.read_text()).items()), write)
+
+
+def resolve(layout: list[dict], pairs) -> dict[int, int]:
+    """(key, target) pairs -> {slot: firmware code}; keys as in `rkkb keys`, m1..m5, or slot:N."""
     names = side_keys(layout) | {k["label"].lower(): k["slot"] for k in layout}
     slots = {k["slot"] for k in layout}
-    overrides = load_state(pid)
-    for spec in specs:
-        key, _, target = spec.partition("=")
+    out = {}
+    for key, target in pairs:
         key = key.lower()
         slot = int(key[5:]) if key.startswith("slot:") else names.get(key)
         if slot not in slots:
             raise typer.BadParameter(f"unknown key {key!r} (see `rkkb keys`)")
-        overrides[slot] = parse_target(target)
-        print(f"{key} (slot {slot}) -> {overrides[slot]:#08x}")
-    send(pid, layout, overrides, write)
+        out[slot] = parse_target(target)
+        print(f"{key} (slot {slot}) -> {out[slot]:#08x}")
+    return out
 
 
 @app.command()
@@ -284,9 +303,17 @@ def learn(pid: int = typer.Option(None, parser=lambda s: int(s, 0))):
             if not matches:
                 print(f"it sent {describe(code)}, which no key should send; skip it (Fn and media keys can't be learned)")
                 continue
-            if len(matches) > 1:
-                print(f"it sent {describe(code)}, shared by slots {matches}; using slot {matches[0]}")
             slot = matches[0]
+            if len(matches) > 1:  # several keys send this code, so ask rather than guess
+                labels = [(alias.get(s) or by_slot[s]["label"]).lower() for s in matches]
+                unique = [labels.count(n) == 1 for n in labels]  # the S70 has two "space" keys
+                names = {n: s for n, s, u in zip(labels, matches, unique) if u} | {str(s): s for s in matches}
+                shown = ", ".join(n if u else f"{n} (slot {s})" for n, s, u in zip(labels, matches, unique))
+                pick = prompt(f"it sent {describe(code)}, which {shown} all send; "
+                              "which key? (name or slot number, Enter skips) ")
+                if pick not in names:
+                    continue
+                slot = names[pick]
             k = by_slot[slot]
             name = alias.get(slot) or k["label"]
             pending = f", pending {describe(overrides.get(slot, k['default']))}" if overrides.get(slot) != saved.get(slot) else ""
@@ -337,6 +364,25 @@ def prompt(text: str) -> str:
 
 
 @contextlib.contextmanager
+def no_terminal_signals():
+    """While capturing, a key mapped to ctrl+c / ctrl+z / ctrl+\\ / ctrl+s also reaches the terminal;
+    keep it from interrupting, suspending or freezing rkkb. prompt() flushes those keystrokes afterwards."""
+    import termios
+    if not sys.stdin.isatty():
+        yield
+        return
+    old = termios.tcgetattr(sys.stdin)
+    new = list(old)
+    new[0] &= ~termios.IXON  # ctrl+s would stop output until ctrl+q
+    new[3] &= ~termios.ISIG
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, new)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, old)
+
+
+@contextlib.contextmanager
 def keyboard_input(pid: int):
     """Yields read_code(): blocks until a key goes down and back up, returns its firmware code.
     Needs the keyboard on USB, and Karabiner told to let go of it for the session."""
@@ -349,18 +395,19 @@ def keyboard_input(pid: int):
         dev = open_or_explain(found[0]["path"])
         try:
             def read_code() -> int:
-                while dev.read(64, 1):
-                    pass  # drop what was typed at the last prompt
-                code = 0
-                while True:
-                    report = dev.read(64, 200)
-                    if not report:
-                        continue
-                    now = report_code(report)
-                    if now:
-                        code = code or now  # the first report with a key down names it
-                    elif code:
-                        return code
+                with no_terminal_signals():
+                    while dev.read(64, 1):
+                        pass  # drop what was typed at the last prompt
+                    code = 0
+                    while True:
+                        report = dev.read(64, 200)
+                        if not report:
+                            continue
+                        now = report_code(report)
+                        if now:
+                            code = code or now  # the first report with a key down names it
+                        elif code:
+                            return code
             yield read_code
         finally:
             dev.close()
