@@ -361,14 +361,15 @@ def prompt(text: str) -> str:
 
 @contextlib.contextmanager
 def no_terminal_signals():
-    """While capturing, a key mapped to ctrl+c / ctrl+z / ctrl+\\ also reaches the terminal; keep it
-    from interrupting or suspending rkkb. prompt() flushes those keystrokes afterwards."""
+    """While capturing, a key mapped to ctrl+c / ctrl+z / ctrl+\\ / ctrl+s also reaches the terminal;
+    keep it from interrupting, suspending or freezing rkkb. prompt() flushes those keystrokes afterwards."""
     import termios
     if not sys.stdin.isatty():
         yield
         return
     old = termios.tcgetattr(sys.stdin)
     new = list(old)
+    new[0] &= ~termios.IXON  # ctrl+s would stop output until ctrl+q
     new[3] &= ~termios.ISIG
     termios.tcsetattr(sys.stdin, termios.TCSANOW, new)
     try:
